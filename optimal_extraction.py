@@ -5,7 +5,8 @@ Created on 21 Nov. 2017
 '''
 
 import numpy as np
-from veloce_reduction.helper_functions import fibmodel, fibmodel_with_amp_and_offset
+from veloce_reduction.helper_functions import fibmodel, fibmodel_with_amp_and_offset,\
+    blaze
 from veloce_reduction.order_tracing import *
 
 #read in polynomial coefficients of best-fit individual-fibre-profile parameters
@@ -18,7 +19,7 @@ def make_norm_profiles(x, ord, col, fibparms, slope=False, offset=False):
     xx = np.arange(4096)
     
     #same number of fibres for every order, of course
-    nfib = len(fibparms['order_01'])   
+    nfib = len(fibparms['order_02'])   
     
     #do we want to include extra "fibres" to take care of slope and/or offset? Default is NO for both (as this should be already taken care of globally)
     if offset:
@@ -102,14 +103,15 @@ def make_norm_single_profile_temp(x, ord, col, fibparms, slope=False, offset=Fal
 
 
 
-def optimal_extraction(P_id, stripes, gain=1., RON=4., timit=False, individual_fibres=False):
+def optimal_extraction(img, P_id, stripes, stripe_indices, gain=1., RON=4., onthefly=False, timit=False, simu=False, individual_fibres=False, debug_level=0):
     
     if timit:
         start_time = time.time()
     
     #read in polynomial coefficients of best-fit individual-fibre-profile parameters
     #fibparms = np.load('/Users/christoph/UNSW/fibre_profiles/sim/fibparms_by_ord.npy').item()
-    fibparms = np.load('/Users/christoph/UNSW/fibre_profiles/real/first_real_veloce_test_fps.npy').item()
+    #fibparms = np.load('/Users/christoph/UNSW/fibre_profiles/real/first_real_veloce_test_fps.npy').item()
+    fibparms = np.load('/Users/christoph/UNSW/fibre_profiles/real/from_master_white.npy').item()
     #nfib = len(fibparms['order_01'])
     nfib = 19
     
@@ -117,8 +119,10 @@ def optimal_extraction(P_id, stripes, gain=1., RON=4., timit=False, individual_f
     err = {}
     pixnum = {}
     
-    print('WARNING: temporary exclusion of order_01 is not commented out!!!')
-    for ord in sorted(P_id.iterkeys())[1:]:
+#     for ord in sorted(P_id.iterkeys()):
+    for ord in sorted(P_id.iterkeys()):
+        if debug_level > 0:
+            print('Processing order '+ord)
         if timit:
             order_start_time = time.time()
         
@@ -130,8 +134,10 @@ def optimal_extraction(P_id, stripes, gain=1., RON=4., timit=False, individual_f
         
         # define stripe
         stripe = stripes[ord]
+        indices = stripe_indices[ord]
         # find the "order-box"
-        sc,sr = flatten_single_stripe(stripe,slit_height=25,timit=False)
+        #sc,sr = flatten_single_stripe(stripe,slit_height=25,timit=False)
+        sc,sr = flatten_single_stripe_from_indices(img,indices,slit_height=25,timit=False)
         
         npix = sc.shape[1]
         pix=[]
@@ -143,48 +149,69 @@ def optimal_extraction(P_id, stripes, gain=1., RON=4., timit=False, individual_f
             e_ord = np.zeros(npix)
         
         goodrange = np.arange(npix)
-        if ord == 'order_01':
+        if simu and ord == 'order_01':
             #goodrange = goodrange[fibparms[ord]['fibre_21']['onchip']]
             goodrange = np.arange(1200,4096)
             for j in range(1200):
                 pix.append(ordnum+str(j+1).zfill(4))
                     
         for i in goodrange:
-            #print(i)
+            if debug_level > 0:
+                print(str(i+1)+'/'+str(npix))
             pix.append(ordnum+str(i+1).zfill(4))
-            z = sc[:,i]-1.     #note the minus 1 is because we added 1 artificially at the beginning in order for extract_stripes to work properly
-            pixerr = np.sqrt( RON*RON + z )
+            z = sc[:,i]
+            if simu:
+                z -= -1.     #note the minus 1 is because we added 1 artificially at the beginning in order for extract_stripes to work properly
+            pixerr = np.sqrt( RON*RON + np.abs(z) )
             #assign weights for flux (and take care of NaNs and INFs)
             pix_w = 1./(pixerr*pixerr)
-            #get normalized profiles for all fibres for this cutout
-            #phi = make_norm_profiles(sr[:,i], ord, i, fibparms)
-            #phi = make_norm_profiles_temp(sr[:,i], ord, i, fibparms)
-            phi = make_norm_single_profile_temp(sr[:,i], ord, i, fibparms)
             
-            print('WARNING: TEMPORARY offset correction is not commented out!!!')
-            #subtract the median as the offset if BG is not properly corrected for
-            z -= np.median(z)
+            if onthefly:
+                quickfit = fit_single_fibre_profile(sr[:,i],z)
+                bestparms = np.array([quickfit.best_values['mu'], quickfit.best_values['sigma'], quickfit.best_values['amp'], quickfit.best_values['beta']])
+                phi = fibmodel_with_amp(sr[:,i],*bestparms)
+                phi /= np.max([np.sum(phi),0.001])   #we can do this because grid-stepsize = 1; also make sure that we do not divide by zero
+                phi = phi.reshape(len(phi),1)   #stupid python...
+            else:
+                #get normalized profiles for all fibres for this cutout
+                #phi = make_norm_profiles(sr[:,i], ord, i, fibparms)
+                #phi = make_norm_profiles_temp(sr[:,i], ord, i, fibparms)
+                phi = make_norm_single_profile_temp(sr[:,i], ord, i, fibparms)
+            
+#             print('WARNING: TEMPORARY offset correction is not commented out!!!')
+#             #subtract the median as the offset if BG is not properly corrected for
+#             z -= np.median(z)
             
             #do the optimal extraction
-            f,v = linalg_extract_column(z, pix_w, phi, altvar=1)
+            if np.sum(phi)==0:
+                f,v = (0.,np.sqrt(len(phi)*RON*RON))
+            else:
+                f,v = linalg_extract_column(z, pix_w, phi, altvar=1)
             #e = np.sqrt(v)
             #model = np.sum(f*phi,axis=1)
         
             #UNLESS YOU WANT TO EXTRACT THE SPECTRUM FOR INDIVIDUAL FIBRES!!!
-            if individual_fibres:   
-                #there should not be negative values!!!
-                f[f<0] = 0.
-                f_ord[:,i] = f
-                #not sure if this is the proper way to do this, but we can't have negative variance
-                v[v<0] = 1.
-                e_ord[:,i] = np.sqrt(v)
+            if not onthefly:
+                if individual_fibres:   
+                    #there should not be negative values!!!
+                    f[f<0] = 0.
+                    f_ord[:,i] = f
+                    #not sure if this is the proper way to do this, but we can't have negative variance
+                    v[v<0] = 1.
+                    e_ord[:,i] = np.sqrt(v)
+                else:
+                    #there should not be negative values!!!
+                    f[f<0] = 0.
+                    f_ord[i] = np.sum(f)
+                    #not sure if this is the proper way to do this, but we can't have negative variance
+                    v[v<0] = 1.
+                    e_ord[i] = np.sqrt(np.sum(v))
             else:
-                #there should not be negative values!!!
-                f[f<0] = 0.
-                f_ord[i] = np.sum(f)
-                #not sure if this is the proper way to do this, but we can't have negative variance
-                v[v<0] = 1.
-                e_ord[i] = np.sqrt(np.sum(v))
+                f_ord[i] = np.max([f,0.])
+                if f_ord[i] == 0 or v <= 0:
+                    e_ord[i] = np.sqrt(len(phi)*RON*RON)
+                else:
+                    e_ord[i] = np.sqrt(v)
          
             
         flux[ord] = f_ord

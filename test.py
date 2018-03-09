@@ -283,13 +283,15 @@ for ord in sorted(laserdata['flux'].iterkeys())[:-1]:
         
 # co-add spectra
 path = '/Users/christoph/UNSW/veloce_spectra/Mar01/'
-for n,file in enumerate(glob.glob(path+'*white*')):
+for n,file in enumerate(glob.glob(path+'*dark*')):
     img = pyfits.getdata(file)
     if n==0:
         h = pyfits.getheader(file)
         master = img.copy().astype(float)
     else:
         master += img
-pyfits.writeto(path+'master_white.fits', master, h)
-        
+pyfits.writeto(path+'master_dark.fits', master, h)
+#and as integer:
+master_int = np.round(master).astype(int)     
+pyfits.writeto(path+'master_dark_int.fits', master_int, h)
 

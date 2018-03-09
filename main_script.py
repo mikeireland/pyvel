@@ -24,6 +24,7 @@ from veloce_reduction.helper_functions import gaussian_with_offset, fibmodel_wit
 from veloce_reduction.order_tracing import *
 from veloce_reduction.collapse_extract import *
 from veloce_reduction.optimal_extraction import *
+from veloce_reduction.background import *
 
 
 
@@ -71,7 +72,7 @@ P_id = make_P_id(P)
 mask = make_mask_dict(tempmask)
 
 # (3) extract stripes of user-defined width from the science image, centred on the polynomial fits defined in step (1)
-stripes = extract_stripes(img, P_id, slit_height=25)
+stripes,stripe_indices = extract_stripes(img, P_id, return_indices=True, slit_height=25)
 
 # (4) extract and fit background
 bg = extract_background(img, P_id, slit_height=25)
@@ -105,7 +106,7 @@ tramlines = find_tramlines(fibre_profiles_02, fibre_profiles_03, fibre_profiles_
 # (6) extract one-dimensional spectrum via (a) tramline extraction, or (b) optimal extraction
 # for laser: pix,flux,err = collapse_extract(stripes, laser_tramlines, laser=True, RON=4., gain=1., timit=True)
 pix,flux,err = collapse_extract(stripes, tramlines, RON=4., gain=1., timit=True)
-pix2,flux2,err2 = optimal_extraction(P_id, stripes, RON=4., gain=1., timit=True, individual_fibres=False)
+pix2,flux2,err2 = optimal_extraction(img, P_id, stripes, stripe_indices, RON=4., gain=1., timit=True, individual_fibres=False)
 
 #### (7) read dispersion solution from file (obviously this is only a temporary crutch)
 ####dispsol = np.load('/Users/christoph/UNSW/dispsol/mean_dispsol_by_orders_from_zemax.npy').item()

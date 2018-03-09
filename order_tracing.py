@@ -207,7 +207,7 @@ def make_mask_dict(tempmask):
 
 
 
-def extract_single_stripe(img, p, slit_height=25, debug_level=0):
+def extract_single_stripe(img, p, slit_height=25, return_indices=False, indonly=False, debug_level=0):
     """
     Extracts single stripe from 2d image.
 
@@ -240,10 +240,10 @@ def extract_single_stripe(img, p, slit_height=25, debug_level=0):
     distance = y_grid - y.repeat(ny).reshape((nx, ny)).T
     indices = abs(distance) <= slit_height
 
-    if debug_level > 2:
+    if debug_level >= 2:
         plt.figure()
         plt.imshow(img)
-        plt.imshow(indices, alpha=0.5)
+        plt.imshow(indices, origin='lower', alpha=0.5)
         plt.show()
 
     mat = sparse.coo_matrix((img[indices], (y_grid[indices], x_grid[indices])), shape=(ny, nx))
@@ -251,11 +251,17 @@ def extract_single_stripe(img, p, slit_height=25, debug_level=0):
     
     #print('Elapsed time: ',time.time() - start_time,' seconds')
     
-    return mat.tocsc()
+    if indonly:
+        return indices
+    else:
+        if return_indices:
+            return mat.tocsc(),indices
+        else:
+            return mat.tocsc()
 
 
 
-def extract_stripes(img, P_id, slit_height=25, output_file=None, timit=False, debug_level=0):
+def extract_stripes(img, P_id, slit_height=25, output_file=None, timit=False, return_indices=True, debug_level=0):
     """
     Extracts the stripes from the original 2D spectrum to a sparse array, containing only relevant pixels.
     
@@ -283,6 +289,8 @@ def extract_stripes(img, P_id, slit_height=25, output_file=None, timit=False, de
     #logging.info('Extract stripes...')
     print('Extracting stripes...')
     stripes = {}
+    if return_indices:
+        stripe_indices = {}
 #     if isinstance(P_id, str):
 #         # get all fibers
 #         P_id = utils.load_dict_from_hdf5(P_id, 'extraction_parameters/')
@@ -290,10 +298,15 @@ def extract_stripes(img, P_id, slit_height=25, output_file=None, timit=False, de
 #         if output_file is not None:
 #             utils.save_dict_to_hdf5(P_id, output_file, 'extraction_parameters/')
 
-    for o, p in P_id.items():
-        stripe = extract_single_stripe(img, p, slit_height, debug_level)
+    for o, p in sorted(P_id.items()):
+        if return_indices:
+            stripe,indices = extract_single_stripe(img, p, slit_height, return_indices=True, debug_level=debug_level)
+        else:
+            stripe = extract_single_stripe(img, p, slit_height, debug_level=debug_level)
+            
 #         if o in stripes:
         stripes.update({o: stripe})
+        stripe_indices.update({o: indices})
 #         else:
 #              stripes = {o: stripe}
 
@@ -304,8 +317,11 @@ def extract_stripes(img, P_id, slit_height=25, output_file=None, timit=False, de
 
     if timit:
         print('Total time taken for "EXTRACT_STRIPES": ',time.time() - overall_start_time,' seconds')
-
-    return stripes
+        
+    if return_indices:
+        return stripes,stripe_indices
+    else:
+        return stripes
 
 
 
@@ -345,7 +361,7 @@ def flatten_single_stripe(stripe, slit_height=25, timit=False):
     #stripe_flux = np.zeros((2*slit_height, 4096))
     stripe_flux = np.zeros((2*slit_height, nx))
     #stripe_rows = np.zeros((int(len(contents[0]) / len(col_indices)),len(col_indices)))
-    stripe_rows = np.zeros((2*slit_height, ny))
+    stripe_rows = np.zeros((2*slit_height, nx))
     
     #check if whole order falls on CCD in dispersion direction
     if len(col_indices) != nx:
@@ -364,7 +380,7 @@ def flatten_single_stripe(stripe, slit_height=25, timit=False):
                     rownum_temp = contents[0][col_indices[i-np.min(col_values)]:col_indices[i-np.min(col_values)+1]]       #row number        
                 #now, because the valid pixels are supposed to be at the bottom of the cutout, we need to roll them to the end
                 if ct != (2*slit_height):
-                    flux = np.zeros(2*slit_height) - 1.     #negative flux can be used to identify these pixels layer
+                    flux = np.zeros(2*slit_height) - 1.     #negative flux can be used to identify these pixels later
                     flux[0:ct] = flux_temp
                     flux = np.roll(flux,2*slit_height - ct)
                     rownum = np.zeros(2*slit_height,dtype='int32')    #zeroes can be used to identify these pixels later
@@ -448,6 +464,74 @@ def flatten_single_stripe(stripe, slit_height=25, timit=False):
         print('Time taken for "flattening" stripe: '+str(delta_t)+' seconds...')
             
     return stripe_flux,stripe_rows.astype(int)
+   
+   
+
+
+def flatten_single_stripe_from_indices(img, indices, slit_height=25, timit=False):
+    """
+    CMB 07/03/2018
+    
+    This function stores the non-zero values of the sparse matrix "stripe" in a rectangular array, ie
+    take out the curvature of the order/stripe, potentially only useful for further processing.
+
+    INPUT:
+    "img": the image from the FITS file
+    "indices": indices of img, that correspond to the stripe identified in 'extract_single_stripe'
+    
+    OUTPUT:
+    "stripe_columns": dense rectangular matrix containing only the non-zero elements of "stripe". This has
+                      dimensions of (2*slit_height, ~4096)
+    "stripe_rows":    row indices (ie rows being in dispersion direction) of the original image for the columns (ie the "cutouts")
+    """
+    #input is sth like this
+    #stripe = stripes['fibre_01']['order_01']
+    #TODO: sort the dictionary by order number...
+    
+    if timit:
+        start_time = time.time()    
+    
+    ny, nx = img.shape
+    
+    #stripe_flux = np.zeros((2*slit_height, 4096))
+    stripe_flux = np.zeros((2*slit_height, nx))
+    #stripe_rows = np.zeros((int(len(contents[0]) / len(col_indices)),len(col_indices)))
+    stripe_rows = np.zeros((2*slit_height, nx))
+    
+    for i in range(nx):
+        #this is the cutout from the original image
+        flux = img[:,i][indices[:,i]]
+        rownum = (indices[:,i] * np.arange(ny))[indices[:,i]]
+        #now check if the full cutout lies on the image
+        #cutout completely off the chip?
+        if len(rownum) == 0:
+            n_miss = 2 * slit_height
+            flux = np.repeat([-999],n_miss)
+            rownum = np.repeat([0],n_miss)
+        #parts missing at BOTTOM???
+        elif rownum[0] == 0:
+            #how many missing?
+            n_miss = 2*slit_height - len(rownum)
+            #append flux and rownum
+            flux = np.append(np.repeat([-999],n_miss),flux)
+            rownum = np.append(np.repeat([0],n_miss),rownum)
+        #parts missing at TOP???
+        elif rownum[-1] == ny-1:
+            #how many missing?
+            n_miss = 2*slit_height - len(rownum)
+            #append flux and rownum
+            flux = np.append(flux,np.repeat([-999],n_miss))
+            rownum = np.append(rownum,np.repeat([0],n_miss))
+    
+        stripe_flux[:,i] = flux
+        stripe_rows[:,i] = rownum
+    
+    if timit:
+        delta_t = time.time() - start_time
+        print('Time taken for "flattening" stripe: '+str(delta_t)+' seconds...')
+            
+    return stripe_flux,stripe_rows.astype(int)
+     
     
 
 
@@ -798,7 +882,7 @@ def fit_profiles_single_order(stripe_rows, stripe_columns, ordpol, osf=1, method
         #loop over all columns for one order and do the profile fitting
         #'colfits' is a dictionary, that has 4096 keys. Each key is an instance of the 'ModelResult'-class from the 'lmfit' package
         colfits = {}
-        npix = sc.shape[1]
+        npix = stripe_columns.shape[1]
         fiblocs = np.poly1d(ordpol)(np.arange(npix))
         #starting_values = None
         for i in range(npix):
@@ -861,7 +945,8 @@ def fit_profiles(P_id, stripes, timit=False):
         # define stripe
         stripe = stripes[ord]
         # find the "order-box"
-        sc,sr = flatten_single_stripe(stripe,slit_height=10,timit=False)
+        #sc,sr = flatten_single_stripe(stripe,slit_height=10,timit=False)
+        sc,sr = flatten_single_stripe_from_indices(img,indices,slit_height=25,timit=False)
         # fit profile for single order and save result in "global" parameter dictionary for entire chip
         colfits = fit_profiles_single_order(sr,sc,ordpol,osf=1,silent=True,timit=timit)
         fibre_profiles[ord] = colfits
@@ -870,6 +955,38 @@ def fit_profiles(P_id, stripes, timit=False):
         print('Time elapsed: '+str(int(time.time() - start_time))+' seconds...')  
           
     return fibre_profiles
+
+
+
+def fit_profiles_from_indices(P_id, img, stripe_indices, timit=False):
+    
+    print('Fitting fibre profiles...')
+    
+    if timit:
+        start_time = time.time()
+        
+    #create "global" parameter dictionary for entire chip
+    fibre_profiles = {}
+    #loop over all orders
+    for ord in sorted(P_id.iterkeys()):
+        print('OK, now processing '+str(ord))
+        ordpol = P_id[ord]
+        
+        # define stripe
+        stripe = stripes[ord]
+        indices = stripe_indices[ord]
+        # find the "order-box"
+        #sc,sr = flatten_single_stripe(stripe,slit_height=10,timit=False)
+        sc,sr = flatten_single_stripe_from_indices(img,indices,slit_height=25,timit=False)
+        # fit profile for single order and save result in "global" parameter dictionary for entire chip
+        colfits = fit_profiles_single_order(sr,sc,ordpol,osf=1,silent=True,timit=timit)
+        fibre_profiles[ord] = colfits
+    
+    if timit:
+        print('Time elapsed: '+str(int(time.time() - start_time))+' seconds...')  
+          
+    return fibre_profiles
+
 
 
 
